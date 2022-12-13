@@ -35,9 +35,6 @@ import sys
 import common
 import verity_utils
 
-from fsverity_digests_pb2 import FSVerityDigests
-from fsverity_metadata_generator import FSVerityMetadataGenerator
-
 logger = logging.getLogger(__name__)
 
 OPTIONS = common.OPTIONS
@@ -271,18 +268,19 @@ def BuildImageMkfs(in_dir, prop_dict, out_file, target_out, fs_config):
   """
   build_command = []
   fs_type = prop_dict.get("fs_type", "")
-  run_e2fsck = False
+  run_fsck = None
   needs_projid = prop_dict.get("needs_projid", 0)
   needs_casefold = prop_dict.get("needs_casefold", 0)
   needs_compress = prop_dict.get("needs_compress", 0)
 
   disable_sparse = "disable_sparse" in prop_dict
+  manual_sparse = False
 
   if fs_type.startswith("ext"):
     build_command = [prop_dict["ext_mkuserimg"]]
     if "extfs_sparse_flag" in prop_dict and not disable_sparse:
       build_command.append(prop_dict["extfs_sparse_flag"])
-      run_e2fsck = True
+      run_e2fsck = RunE2fsck
     build_command.extend([in_dir, out_file, fs_type,
                           prop_dict["mount_point"]])
     build_command.append(prop_dict["image_size"])
@@ -323,17 +321,8 @@ def BuildImageMkfs(in_dir, prop_dict, out_file, target_out, fs_config):
     if "selinux_fc" in prop_dict:
       build_command.append(prop_dict["selinux_fc"])
   elif fs_type.startswith("erofs"):
-    build_command = ["mkerofsimage.sh"]
-    build_command.extend([in_dir, out_file])
-    if "erofs_sparse_flag" in prop_dict and not disable_sparse:
-      build_command.extend([prop_dict["erofs_sparse_flag"]])
-    build_command.extend(["-m", prop_dict["mount_point"]])
-    if target_out:
-      build_command.extend(["-d", target_out])
-    if fs_config:
-      build_command.extend(["-C", fs_config])
-    if "selinux_fc" in prop_dict:
-      build_command.extend(["-c", prop_dict["selinux_fc"]])
+    build_command = ["mkfs.erofs"]
+
     compressor = None
     if "erofs_default_compressor" in prop_dict:
       compressor = prop_dict["erofs_default_compressor"]
@@ -341,16 +330,32 @@ def BuildImageMkfs(in_dir, prop_dict, out_file, target_out, fs_config):
       compressor = prop_dict["erofs_compressor"]
     if compressor:
       build_command.extend(["-z", compressor])
+
+    build_command.extend(["--mount-point", prop_dict["mount_point"]])
+    if target_out:
+      build_command.extend(["--product-out", target_out])
+    if fs_config:
+      build_command.extend(["--fs-config-file", fs_config])
+    if "selinux_fc" in prop_dict:
+      build_command.extend(["--file-contexts", prop_dict["selinux_fc"]])
     if "timestamp" in prop_dict:
       build_command.extend(["-T", str(prop_dict["timestamp"])])
     if "uuid" in prop_dict:
       build_command.extend(["-U", prop_dict["uuid"]])
     if "block_list" in prop_dict:
-      build_command.extend(["-B", prop_dict["block_list"]])
+      build_command.extend(["--block-list-file", prop_dict["block_list"]])
     if "erofs_pcluster_size" in prop_dict:
-      build_command.extend(["-P", prop_dict["erofs_pcluster_size"]])
+      build_command.extend(["-C", prop_dict["erofs_pcluster_size"]])
     if "erofs_share_dup_blocks" in prop_dict:
-      build_command.extend(["-k", "4096"])
+      build_command.extend(["--chunksize", "4096"])
+    if "erofs_use_legacy_compression" in prop_dict:
+      build_command.extend(["-E", "legacy-compress"])
+
+    build_command.extend([out_file, in_dir])
+    if "erofs_sparse_flag" in prop_dict and not disable_sparse:
+      manual_sparse = True
+
+    run_fsck = RunErofsFsck
   elif fs_type.startswith("squash"):
     build_command = ["mksquashfsimage.sh"]
     build_command.extend([in_dir, out_file])
@@ -439,80 +444,37 @@ def BuildImageMkfs(in_dir, prop_dict, out_file, target_out, fs_config):
               int(prop_dict["partition_size"]) // BYTES_IN_MB))
     raise
 
-  if run_e2fsck and prop_dict.get("skip_fsck") != "true":
-    unsparse_image = UnsparseImage(out_file, replace=False)
+  if run_fsck and prop_dict.get("skip_fsck") != "true":
+    run_fsck(out_file)
 
-    # Run e2fsck on the inflated image file
-    e2fsck_command = ["e2fsck", "-f", "-n", unsparse_image]
-    try:
-      common.RunAndCheckOutput(e2fsck_command)
-    finally:
-      os.remove(unsparse_image)
+  if manual_sparse:
+    temp_file = out_file + ".sparse"
+    img2simg_argv = ["img2simg", out_file, temp_file]
+    common.RunAndCheckOutput(img2simg_argv)
+    os.rename(temp_file, out_file)
 
   return mkfs_output
 
-def GenerateFSVerityMetadata(in_dir, fsverity_path, apk_key_path, apk_manifest_path, apk_out_path):
-  """Generates fsverity metadata files.
 
-  By setting PRODUCT_SYSTEM_FSVERITY_GENERATE_METADATA := true, fsverity
-  metadata files will be generated. For the input files, see `patterns` below.
+def RunE2fsck(out_file):
+  unsparse_image = UnsparseImage(out_file, replace=False)
 
-  One metadata file per one input file will be generated with the suffix
-  .fsv_meta. e.g. system/framework/foo.jar -> system/framework/foo.jar.fsv_meta
-  Also a mapping file containing fsverity digests will be generated to
-  system/etc/security/fsverity/BuildManifest.apk.
+  # Run e2fsck on the inflated image file
+  e2fsck_command = ["e2fsck", "-f", "-n", unsparse_image]
+  try:
+    common.RunAndCheckOutput(e2fsck_command)
+  finally:
+    os.remove(unsparse_image)
 
-  Args:
-    in_dir: temporary working directory (same as BuildImage)
-    fsverity_path: path to host tool fsverity
-    apk_key_path: path to key (e.g. build/make/target/product/security/platform)
-    apk_manifest_path: path to AndroidManifest.xml for APK
-    apk_out_path: path to the output APK
 
-  Returns:
-    None. The files are generated directly under in_dir.
-  """
+def RunErofsFsck(out_file):
+  fsck_command = ["fsck.erofs", "--extract", out_file]
+  try:
+    common.RunAndCheckOutput(fsck_command)
+  except:
+    print("Check failed for EROFS image {}".format(out_file))
+    raise
 
-  patterns = [
-    "system/framework/*.jar",
-    "system/framework/oat/*/*.oat",
-    "system/framework/oat/*/*.vdex",
-    "system/framework/oat/*/*.art",
-    "system/etc/boot-image.prof",
-    "system/etc/dirty-image-objects",
-  ]
-  files = []
-  for pattern in patterns:
-    files += glob.glob(os.path.join(in_dir, pattern))
-  files = sorted(set(files))
-
-  generator = FSVerityMetadataGenerator(fsverity_path)
-  generator.set_hash_alg("sha256")
-
-  digests = FSVerityDigests()
-  for f in files:
-    generator.generate(f)
-    # f is a full path for now; make it relative so it starts with {mount_point}/
-    digest = digests.digests[os.path.relpath(f, in_dir)]
-    digest.digest = generator.digest(f)
-    digest.hash_alg = "sha256"
-
-  temp_dir = common.MakeTempDir()
-
-  os.mkdir(os.path.join(temp_dir, "assets"))
-  metadata_path = os.path.join(temp_dir, "assets", "build_manifest")
-  with open(metadata_path, "wb") as f:
-    f.write(digests.SerializeToString())
-
-  apk_path = os.path.join(in_dir, apk_out_path)
-
-  common.RunAndCheckOutput(["aapt2", "link",
-      "-A", os.path.join(temp_dir, "assets"),
-      "-o", apk_path,
-      "--manifest", apk_manifest_path])
-  common.RunAndCheckOutput(["apksigner", "sign", "--in", apk_path,
-      "--cert", apk_key_path + ".x509.pem",
-      "--key", apk_key_path + ".pk8"])
 
 def BuildImage(in_dir, prop_dict, out_file, target_out=None):
   """Builds an image for the files under in_dir and writes it to out_file.
@@ -540,13 +502,6 @@ def BuildImage(in_dir, prop_dict, out_file, target_out=None):
     fs_spans_partition = False
   elif fs_type.startswith("f2fs") and prop_dict.get("f2fs_compress") == "true":
     fs_spans_partition = False
-
-  if "fsverity_generate_metadata" in prop_dict:
-    GenerateFSVerityMetadata(in_dir,
-        fsverity_path=prop_dict["fsverity"],
-        apk_key_path=prop_dict["fsverity_apk_key"],
-        apk_manifest_path=prop_dict["fsverity_apk_manifest"],
-        apk_out_path=prop_dict["fsverity_apk_out"])
 
   # Get a builder for creating an image that's to be verified by Verified Boot,
   # or None if not applicable.
@@ -651,6 +606,10 @@ def BuildImage(in_dir, prop_dict, out_file, target_out=None):
   if not mkfs_output:
     mkfs_output = BuildImageMkfs(in_dir, prop_dict, out_file, target_out, fs_config)
 
+  # Update the image (eg filesystem size). This can be different eg if mkfs
+  # rounds the requested size down due to alignment.
+  prop_dict["image_size"] = common.sparse_img.GetImagePartitionSize(out_file)
+
   # Check if there's enough headroom space available for ext4 image.
   if "partition_headroom" in prop_dict and fs_type.startswith("ext4"):
     CheckHeadroom(mkfs_output, prop_dict)
@@ -696,6 +655,7 @@ def ImagePropFromGlobalDict(glob_dict, mount_point):
       "erofs_pcluster_size",
       "erofs_share_dup_blocks",
       "erofs_sparse_flag",
+      "erofs_use_legacy_compression",
       "squashfs_sparse_flag",
       "system_f2fs_compress",
       "system_f2fs_sldc_flags",
@@ -720,6 +680,7 @@ def ImagePropFromGlobalDict(glob_dict, mount_point):
       "oem",
       "product",
       "system",
+      "system_dlkm",
       "system_ext",
       "system_other",
       "vendor",
@@ -740,6 +701,7 @@ def ImagePropFromGlobalDict(glob_dict, mount_point):
       (True, "avb_{}_hashtree_enable", "avb_hashtree_enable"),
       (True, "avb_{}_key_path", "avb_key_path"),
       (True, "avb_{}_salt", "avb_salt"),
+      (True, "erofs_use_legacy_compression", "erofs_use_legacy_compression"),
       (True, "ext4_share_dup_blocks", "ext4_share_dup_blocks"),
       (True, "{}_base_fs_file", "base_fs_file"),
       (True, "{}_disable_sparse", "disable_sparse"),
@@ -773,7 +735,7 @@ def ImagePropFromGlobalDict(glob_dict, mount_point):
       if mount_point not in allowed_partitions:
           continue
 
-    if mount_point == "system_other":
+    if (mount_point == "system_other") and (dest_prop != "partition_size"):
       # Propagate system properties to system_other. They'll get overridden
       # after as needed.
       copy_prop(src_prop.format("system"), dest_prop)
@@ -797,11 +759,6 @@ def ImagePropFromGlobalDict(glob_dict, mount_point):
     copy_prop("system_root_image", "system_root_image")
     copy_prop("root_dir", "root_dir")
     copy_prop("root_fs_config", "root_fs_config")
-    copy_prop("fsverity", "fsverity")
-    copy_prop("fsverity_generate_metadata", "fsverity_generate_metadata")
-    copy_prop("fsverity_apk_key","fsverity_apk_key")
-    copy_prop("fsverity_apk_manifest","fsverity_apk_manifest")
-    copy_prop("fsverity_apk_out","fsverity_apk_out")
   elif mount_point == "data":
     # Copy the generic fs type first, override with specific one if available.
     copy_prop("flash_logical_block_size", "flash_logical_block_size")
@@ -847,6 +804,8 @@ def GlobalDictFromImageProp(image_prop, mount_point):
     copy_prop("partition_size", "vendor_dlkm_size")
   elif mount_point == "odm_dlkm":
     copy_prop("partition_size", "odm_dlkm_size")
+  elif mount_point == "system_dlkm":
+    copy_prop("partition_size", "system_dlkm_size")
   elif mount_point == "product":
     copy_prop("partition_size", "product_size")
   elif mount_point == "system_ext":
@@ -890,6 +849,8 @@ def main(argv):
       mount_point = "vendor_dlkm"
     elif image_filename == "odm_dlkm.img":
       mount_point = "odm_dlkm"
+    elif image_filename == "system_dlkm.img":
+      mount_point = "system_dlkm"
     elif image_filename == "oem.img":
       mount_point = "oem"
     elif image_filename == "product.img":

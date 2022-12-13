@@ -75,6 +75,14 @@ PRODUCT_PACKAGES += \
 PRODUCT_PACKAGES += \
     hiddenapi-package-whitelist.xml \
 
+ifeq (,$(TARGET_BUILD_UNBUNDLED))
+  # Don't depend on the framework boot image profile in unbundled builds where
+  # frameworks/base may not be present.
+  # TODO(b/179900989): We may not need this check once we stop using full
+  # platform products on the thin ART manifest branch.
+  PRODUCT_DEX_PREOPT_BOOT_IMAGE_PROFILE_LOCATION += frameworks/base/boot/boot-image-profile.txt
+endif
+
 # The dalvik.vm.dexopt.thermal-cutoff property must contain one of the values
 # listed here:
 #
@@ -139,17 +147,6 @@ PRODUCT_SYSTEM_PROPERTIES += \
 PRODUCT_SYSTEM_PROPERTIES += \
     dalvik.vm.minidebuginfo=true \
     dalvik.vm.dex2oat-minidebuginfo=true
-
-# Two other device configs are added to IORap besides "ro.iorapd.enable".
-# IORap by default is off and starts when
-# (https://source.corp.google.com/android/system/iorap/iorapd.rc?q=iorapd.rc)
-#
-# * "ro.iorapd.enable" is true excluding unset
-# * One of the device configs is true.
-#
-# "ro.iorapd.enable" has to be set to true, so that iorap can be started.
-PRODUCT_SYSTEM_PROPERTIES += \
-    ro.iorapd.enable?=true
 
 # Enable Madvising of the whole art, odex and vdex files to MADV_WILLNEED.
 # The size specified here is the size limit of how much of the file

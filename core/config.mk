@@ -159,6 +159,8 @@ $(KATI_deprecated_var BOARD_PLAT_PUBLIC_SEPOLICY_DIR,Use SYSTEM_EXT_PUBLIC_SEPOL
 $(KATI_deprecated_var BOARD_PLAT_PRIVATE_SEPOLICY_DIR,Use SYSTEM_EXT_PRIVATE_SEPOLICY_DIRS instead)
 $(KATI_obsolete_var TARGET_NO_VENDOR_BOOT,Use PRODUCT_BUILD_VENDOR_BOOT_IMAGE instead)
 $(KATI_obsolete_var PRODUCT_CHECK_ELF_FILES,Use BUILD_BROKEN_PREBUILT_ELF_FILES instead)
+$(KATI_obsolete_var ALL_GENERATED_SOURCES,ALL_GENERATED_SOURCES is no longer used)
+$(KATI_obsolete_var ALL_ORIGINAL_DYNAMIC_BINARIES,ALL_ORIGINAL_DYNAMIC_BINARIES is no longer used)
 
 # Used to force goals to build.  Only use for conditionally defined goals.
 .PHONY: FORCE
@@ -494,7 +496,9 @@ TARGET_BUILD_USE_PREBUILT_SDKS :=
 DISABLE_PREOPT :=
 ifneq (,$(TARGET_BUILD_APPS)$(TARGET_BUILD_UNBUNDLED_IMAGE))
   DISABLE_PREOPT := true
-  ifndef UNBUNDLED_BUILD_SDKS_FROM_SOURCE
+endif
+ifeq (true,$(TARGET_BUILD_UNBUNDLED))
+  ifneq (true,$(UNBUNDLED_BUILD_SDKS_FROM_SOURCE))
     TARGET_BUILD_USE_PREBUILT_SDKS := true
   endif
 endif
@@ -577,6 +581,7 @@ VTSC := $(HOST_OUT_EXECUTABLES)/vtsc$(HOST_EXECUTABLE_SUFFIX)
 MKBOOTFS := $(HOST_OUT_EXECUTABLES)/mkbootfs$(HOST_EXECUTABLE_SUFFIX)
 MINIGZIP := $(HOST_OUT_EXECUTABLES)/minigzip$(HOST_EXECUTABLE_SUFFIX)
 LZ4 := $(HOST_OUT_EXECUTABLES)/lz4$(HOST_EXECUTABLE_SUFFIX)
+GENERATE_GKI_CERTIFICATE := $(HOST_OUT_EXECUTABLES)/generate_gki_certificate$(HOST_EXECUTABLE_SUFFIX)
 ifeq (,$(strip $(BOARD_CUSTOM_MKBOOTIMG)))
 MKBOOTIMG := $(HOST_OUT_EXECUTABLES)/mkbootimg$(HOST_EXECUTABLE_SUFFIX)
 else
@@ -596,7 +601,7 @@ APICHECK := $(HOST_OUT_JAVA_LIBRARIES)/metalava$(COMMON_JAVA_PACKAGE_SUFFIX)
 FS_GET_STATS := $(HOST_OUT_EXECUTABLES)/fs_get_stats$(HOST_EXECUTABLE_SUFFIX)
 MKEXTUSERIMG := $(HOST_OUT_EXECUTABLES)/mkuserimg_mke2fs
 MKE2FS_CONF := system/extras/ext4_utils/mke2fs.conf
-MKEROFSUSERIMG := $(HOST_OUT_EXECUTABLES)/mkerofsimage.sh
+MKEROFS := $(HOST_OUT_EXECUTABLES)/mkfs.erofs
 MKSQUASHFSUSERIMG := $(HOST_OUT_EXECUTABLES)/mksquashfsimage.sh
 MKF2FSUSERIMG := $(HOST_OUT_EXECUTABLES)/mkf2fsuserimg.sh
 SIMG2IMG := $(HOST_OUT_EXECUTABLES)/simg2img$(HOST_EXECUTABLE_SUFFIX)
@@ -615,6 +620,7 @@ MAKE_RECOVERY_PATCH := $(HOST_OUT_EXECUTABLES)/make_recovery_patch$(HOST_EXECUTA
 OTA_FROM_TARGET_FILES := $(HOST_OUT_EXECUTABLES)/ota_from_target_files$(HOST_EXECUTABLE_SUFFIX)
 SPARSE_IMG := $(HOST_OUT_EXECUTABLES)/sparse_img$(HOST_EXECUTABLE_SUFFIX)
 CHECK_PARTITION_SIZES := $(HOST_OUT_EXECUTABLES)/check_partition_sizes$(HOST_EXECUTABLE_SUFFIX)
+SYMBOLS_MAP := $(HOST_OUT_EXECUTABLES)/symbols_map
 
 PROGUARD_HOME := external/proguard
 PROGUARD := $(PROGUARD_HOME)/bin/proguard.sh
@@ -815,7 +821,7 @@ BUILD_DATETIME_FROM_FILE := $$(cat $(BUILD_DATETIME_FILE))
 # is made which breaks compatibility with the previous platform sepolicy version,
 # not just on every increase in PLATFORM_SDK_VERSION.  The minor version should
 # be reset to 0 on every bump of the PLATFORM_SDK_VERSION.
-sepolicy_major_vers := 31
+sepolicy_major_vers := 33
 sepolicy_minor_vers := 0
 
 ifneq ($(sepolicy_major_vers), $(PLATFORM_SDK_VERSION))
@@ -831,14 +837,30 @@ endif
 sepolicy_major_vers :=
 sepolicy_minor_vers :=
 
+# BOARD_SEPOLICY_VERS must take the format "NN.m" and contain the sepolicy
+# version identifier corresponding to the sepolicy on which the non-platform
+# policy is to be based. If unspecified, this will build against the current
+# public platform policy in tree
+ifndef BOARD_SEPOLICY_VERS
+# The default platform policy version.
+BOARD_SEPOLICY_VERS := $(PLATFORM_SEPOLICY_VERSION)
+endif
+
+ifeq ($(BOARD_SEPOLICY_VERS),$(PLATFORM_SEPOLICY_VERSION))
+IS_TARGET_MIXED_SEPOLICY :=
+else
+IS_TARGET_MIXED_SEPOLICY := true
+endif
+
+.KATI_READONLY := IS_TARGET_MIXED_SEPOLICY
+
 # A list of SEPolicy versions, besides PLATFORM_SEPOLICY_VERSION, that the framework supports.
 PLATFORM_SEPOLICY_COMPAT_VERSIONS := \
-    26.0 \
-    27.0 \
     28.0 \
     29.0 \
     30.0 \
     31.0 \
+    32.0 \
 
 .KATI_READONLY := \
     PLATFORM_SEPOLICY_COMPAT_VERSIONS \
@@ -911,6 +933,13 @@ $(error Should not define BOARD_ODM_DLKMIMAGE_PARTITION_SIZE and \
 endif
 endif
 
+ifneq ($(BOARD_SYSTEM_DLKMIMAGE_PARTITION_SIZE),)
+ifneq ($(BOARD_SYSTEM_DLKMIMAGE_PARTITION_RESERVED_SIZE),)
+$(error Should not define BOARD_SYSTEM_DLKMIMAGE_PARTITION_SIZE and \
+    BOARD_SYSTEM_DLKMIMAGE_PARTITION_RESERVED_SIZE together)
+endif
+endif
+
 ifneq ($(BOARD_PRODUCTIMAGE_PARTITION_SIZE),)
 ifneq ($(BOARD_PRODUCTIMAGE_PARTITION_RESERVED_SIZE),)
 $(error Should not define BOARD_PRODUCTIMAGE_PARTITION_SIZE and \
@@ -946,7 +975,7 @@ $(foreach group,$(call to-upper,$(BOARD_SUPER_PARTITION_GROUPS)), \
 )
 
 # BOARD_*_PARTITION_LIST: a list of the following tokens
-valid_super_partition_list := system vendor product system_ext odm vendor_dlkm odm_dlkm
+valid_super_partition_list := system vendor product system_ext odm vendor_dlkm odm_dlkm system_dlkm
 $(foreach group,$(call to-upper,$(BOARD_SUPER_PARTITION_GROUPS)), \
     $(if $(filter-out $(valid_super_partition_list),$(BOARD_$(group)_PARTITION_LIST)), \
         $(error BOARD_$(group)_PARTITION_LIST contains invalid partition name \
@@ -1204,10 +1233,27 @@ else ifneq (,$(filter-out false,$(USE_RBE)))
 endif
 .KATI_READONLY := GOMA_POOL RBE_POOL GOMA_OR_RBE_POOL
 
+JAVAC_NINJA_POOL :=
+R8_NINJA_POOL :=
+D8_NINJA_POOL :=
+
+ifneq ($(filter-out false,$(USE_RBE)),)
+  ifdef RBE_JAVAC
+    JAVAC_NINJA_POOL := $(RBE_POOL)
+  endif
+  ifdef RBE_R8
+    R8_NINJA_POOL := $(RBE_POOL)
+  endif
+  ifdef RBE_D8
+    D8_NINJA_POOL := $(RBE_POOL)
+  endif
+endif
+
+.KATI_READONLY := JAVAC_NINJA_POOL R8_NINJA_POOL D8_NINJA_POOL
+
 # These goals don't need to collect and include Android.mks/CleanSpec.mks
 # in the source tree.
-dont_bother_goals := out \
-    product-graph dump-products
+dont_bother_goals := out product-graph
 
 # Make ANDROID Soong config variables visible to Android.mk files, for
 # consistency with those defined in BoardConfig.mk files.

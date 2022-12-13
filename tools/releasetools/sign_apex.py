@@ -141,7 +141,7 @@ def main(argv):
       signing_args=options.get('payload_extra_args'),
       codename_to_api_level_map=options.get(
           'codename_to_api_level_map', {}),
-      sign_tool=options['sign_tool'])
+      sign_tool=options.get('sign_tool', None))
   shutil.copyfile(signed_apex, args[1])
   logger.info("done.")
 
@@ -149,8 +149,5 @@ def main(argv):
 if __name__ == '__main__':
   try:
     main(sys.argv[1:])
-  except common.ExternalError:
-    logger.exception("\n   ERROR:\n")
-    sys.exit(1)
   finally:
     common.Cleanup()
